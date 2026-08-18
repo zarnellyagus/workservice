@@ -1,0 +1,847 @@
+using ICLIPS_API.Repositories;
+using Microsoft.AspNetCore.Mvc;
+
+namespace ICLIPS_API.Controllers;
+
+[ApiController]
+[Route("api/agents")]
+public sealed class AgentsController : ControllerBase
+{
+    private readonly IAgentRepository _repository;
+
+    public AgentsController(
+        IAgentRepository repository)
+    {
+        _repository = repository;
+    }
+
+    [HttpGet("detail")]
+    public async Task<IActionResult> GetDetail(
+        [FromQuery] string? companyID = null,
+        [FromQuery] string? agentID = null,
+        [FromQuery] string? policyID = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedCompanyId =
+            Normalize(companyID);
+
+        var normalizedAgentId =
+            Normalize(agentID);
+
+        var normalizedPolicyId =
+            Normalize(policyID);
+
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        var result =
+            await _repository.GetDetailAsync(
+                normalizedCompanyId,
+                normalizedAgentId,
+                normalizedPolicyId,
+                page,
+                pageSize,
+                cancellationToken);
+
+        return Ok(new
+        {
+            success = true,
+
+            message = normalizedAgentId is null
+                ? "Agent list retrieved."
+                : "Agent found.",
+
+            data = result.Items,
+
+            pagination = new
+            {
+                page = result.Page,
+                pageSize = result.PageSize,
+                totalRows = result.TotalRows,
+                totalPages = result.TotalPages,
+                hasPreviousPage =
+                    result.HasPreviousPage,
+                hasNextPage =
+                    result.HasNextPage
+            }
+        });
+    }
+
+    [HttpGet("search")]
+    public async Task<IActionResult> Search(
+        [FromQuery] string? companyID = null,
+        [FromQuery] string? policyID = null,
+        [FromQuery] string? agentID = null,
+        [FromQuery] string? agentName = null,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 20,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new AgentSearchRequest
+        {
+            CompanyId = Normalize(companyID),
+            PolicyId = Normalize(policyID),
+            AgentId = Normalize(agentID),
+            AgentName = Normalize(agentName),
+            Page = page,
+            PageSize = pageSize
+        }.Normalize();
+
+        var result =
+            await _repository.SearchAsync(
+                request,
+                cancellationToken);
+
+        return Ok(new
+        {
+            success = true,
+            message = "Agent list retrieved.",
+            data = result.Items,
+            pagination = new
+            {
+                page = result.Page,
+                pageSize = result.PageSize,
+                totalRows = result.TotalRows,
+                totalPages = result.TotalPages,
+                hasPreviousPage =
+                    result.HasPreviousPage,
+                hasNextPage =
+                    result.HasNextPage
+            }
+        });
+    }
+
+    [HttpGet("health")]
+    public IActionResult Health()
+    {
+        return Ok(new
+        {
+            success = true,
+            message = "Agent API is running.",
+            timestamp = DateTime.UtcNow
+        });
+    }
+
+    private static string? Normalize(
+        string? value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? null
+            : value.Trim();
+    }
+}
+
+namespace ICLIPS_API.DTOs;
+
+public sealed class AgentDto
+{
+    public string PolicyID { get; init; } =
+        string.Empty;
+
+    public string CompanyID { get; init; } =
+        string.Empty;
+
+    public string AgentID { get; init; } =
+        string.Empty;
+
+    public string AgentName { get; init; } =
+        string.Empty;
+
+    public DateTime? AgentEffDate { get; init; }
+
+    public string AgentStatus { get; init; } =
+        string.Empty;
+
+    public string? Statusage { get; init; }
+
+    public string? HomePhone { get; init; }
+
+    public string? CreatedBy { get; init; }
+
+    public DateTime? CreatedDate { get; init; }
+
+    public string? UpdatedBy { get; init; }
+
+    public DateTime? UpdatedDate { get; init; }
+
+    public string? BranchID { get; init; }
+
+    public string? BranchName { get; init; }
+
+    public string? MainBranchID { get; init; }
+
+    public string? MainBranchName { get; init; }
+
+    public string? AreaID { get; init; }
+
+    public string? AreaName { get; init; }
+
+    public string? CrudanID { get; init; }
+
+    public string? CrudanName { get; init; }
+}
+
+
+using ICLIPS_API.DTOs;
+using ICLIPS_API.Repositories;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using System.Data;
+
+namespace ICLIPS_API.Repositories;
+
+public sealed class AgentRepository : IAgentRepository
+{
+    private readonly string _connectionString;
+
+    public AgentRepository(
+        IConfiguration configuration)
+    {
+        _connectionString =
+            configuration.GetConnectionString(
+                "DefaultConnection")
+            ?? throw new InvalidOperationException(
+                "Connection string 'DefaultConnection' was not found.");
+    }
+
+    public async Task<AgentSearchResult> GetDetailAsync(
+        string? companyId,
+        string? agentId,
+        string? policyId,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default)
+    {
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        var offset = (page - 1) * pageSize;
+
+        const string countSql = """
+            SELECT COUNT_BIG(1)
+            FROM tagent a
+            WHERE (
+                    ISNULL(@CompanyID, '') = ''
+                    OR ISNULL(a.CompanyID, '') = @CompanyID
+                  )
+              AND (
+                    ISNULL(@PolicyID, '') = ''
+                    OR ISNULL(a.PolicyID, '') = @PolicyID
+                  )
+              AND (
+                    ISNULL(@AgentID, '') = ''
+                    OR ISNULL(a.AgentID, '') = @AgentID
+                  );
+            """;
+
+        const string dataSql = """
+            SELECT
+                a.PolicyID,
+                a.CompanyID,
+                a.AgentID,
+                a.AgentName,
+                a.AgentEffDate,
+                a.AgentStatus,
+                a.HomePhone,
+                a.CreatedBy,
+                a.CreatedDate,
+                a.UpdatedBy,
+                a.UpdatedDate,
+                b.BranchID,
+                b.BranchName,
+                c.MainBranchID,
+                c.MainBranchName,
+                d.AreaID,
+                d.AreaName,
+                e.CrudanID,
+                e.CrudanName,
+                CASE a.AgentStatus
+                    WHEN 'A' THEN 'Active'
+                    WHEN 'I' THEN 'Inactive'
+                    ELSE a.AgentStatus
+                END AS Statusage
+            FROM tagent a
+            LEFT JOIN tbranch b
+                ON a.CompanyID = b.CompanyID
+                AND a.BranchID = b.BranchID
+                AND a.PolicyID = b.PolicyID
+            LEFT JOIN tmainbranch c
+                ON a.CompanyID = c.CompanyID
+                AND b.MainBranchID = c.MainBranchID
+                AND a.PolicyID = c.PolicyID
+            LEFT JOIN tarea d
+                ON a.CompanyID = d.CompanyID
+                AND a.AreaID = d.AreaID
+                AND a.PolicyID = d.PolicyID
+            LEFT JOIN tcrudan e
+                ON a.CompanyID = e.CompanyID
+                AND d.CrudanID = e.CrudanID
+                AND a.PolicyID = e.PolicyID
+            WHERE (
+                    ISNULL(@CompanyID, '') = ''
+                    OR ISNULL(a.CompanyID, '') = @CompanyID
+                  )
+              AND (
+                    ISNULL(@PolicyID, '') = ''
+                    OR ISNULL(a.PolicyID, '') = @PolicyID
+                  )
+              AND (
+                    ISNULL(@AgentID, '') = ''
+                    OR ISNULL(a.AgentID, '') = @AgentID
+                  )
+            ORDER BY
+                a.AgentID,
+                a.PolicyID
+            OFFSET @Offset ROWS
+            FETCH NEXT @PageSize ROWS ONLY;
+            """;
+
+        await using var connection =
+            new SqlConnection(_connectionString);
+
+        await connection.OpenAsync(
+            cancellationToken);
+
+        var totalRows =
+            await ExecuteCountAsync(
+                connection,
+                countSql,
+                companyId,
+                agentId,
+                policyId,
+                cancellationToken);
+
+        var items = new List<AgentDto>();
+
+        await using var command =
+            new SqlCommand(dataSql, connection)
+            {
+                CommandType = CommandType.Text,
+                CommandTimeout = 30
+            };
+
+        AddNullableStringParameter(
+            command,
+            "@CompanyID",
+            companyId);
+
+        AddNullableStringParameter(
+            command,
+            "@PolicyID",
+            policyId);
+
+        AddNullableStringParameter(
+            command,
+            "@AgentID",
+            agentId);
+
+        AddIntParameter(
+            command,
+            "@Offset",
+            offset);
+
+        AddIntParameter(
+            command,
+            "@PageSize",
+            pageSize);
+
+        await using var reader =
+            await command.ExecuteReaderAsync(
+                cancellationToken);
+
+        while (await reader.ReadAsync(
+            cancellationToken))
+        {
+            items.Add(MapAgent(reader));
+        }
+
+        return new AgentSearchResult
+        {
+            Items = items,
+            TotalRows = totalRows,
+            Page = page,
+            PageSize = pageSize
+        };
+    }
+
+    public async Task<AgentSearchResult> SearchAsync(
+        AgentSearchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedRequest =
+            request.Normalize();
+
+        var page =
+            normalizedRequest.Page;
+
+        var pageSize =
+            normalizedRequest.PageSize;
+
+        var offset =
+            (page - 1) * pageSize;
+
+        const string countSql = """
+            SELECT COUNT_BIG(1)
+            FROM tagent a
+            WHERE (
+                    ISNULL(@CompanyID, '') = ''
+                    OR ISNULL(a.CompanyID, '') = @CompanyID
+                  )
+              AND (
+                    ISNULL(@PolicyID, '') = ''
+                    OR ISNULL(a.PolicyID, '') = @PolicyID
+                  )
+              AND (
+                    ISNULL(@AgentID, '') = ''
+                    OR ISNULL(a.AgentID, '') = @AgentID
+                  )
+              AND (
+                    ISNULL(@AgentName, '') = ''
+                    OR ISNULL(a.AgentName, '')
+                        LIKE '%' + @AgentName + '%'
+                  );
+            """;
+
+        const string dataSql = """
+            SELECT
+                a.PolicyID,
+                a.CompanyID,
+                a.AgentID,
+                a.AgentName,
+                a.AgentEffDate,
+                a.AgentStatus,
+                a.HomePhone,
+                a.CreatedBy,
+                a.CreatedDate,
+                a.UpdatedBy,
+                a.UpdatedDate,
+                b.BranchID,
+                b.BranchName,
+                c.MainBranchID,
+                c.MainBranchName,
+                d.AreaID,
+                d.AreaName,
+                e.CrudanID,
+                e.CrudanName,
+                CASE a.AgentStatus
+                    WHEN 'A' THEN 'Active'
+                    WHEN 'I' THEN 'Inactive'
+                    ELSE a.AgentStatus
+                END AS Statusage
+            FROM tagent a
+            LEFT JOIN tbranch b
+                ON a.CompanyID = b.CompanyID
+                AND a.BranchID = b.BranchID
+                AND a.PolicyID = b.PolicyID
+            LEFT JOIN tmainbranch c
+                ON a.CompanyID = c.CompanyID
+                AND b.MainBranchID = c.MainBranchID
+                AND a.PolicyID = c.PolicyID
+            LEFT JOIN tarea d
+                ON a.CompanyID = d.CompanyID
+                AND a.AreaID = d.AreaID
+                AND a.PolicyID = d.PolicyID
+            LEFT JOIN tcrudan e
+                ON a.CompanyID = e.CompanyID
+                AND d.CrudanID = e.CrudanID
+                AND a.PolicyID = e.PolicyID
+            WHERE (
+                    ISNULL(@CompanyID, '') = ''
+                    OR ISNULL(a.CompanyID, '') = @CompanyID
+                  )
+              AND (
+                    ISNULL(@PolicyID, '') = ''
+                    OR ISNULL(a.PolicyID, '') = @PolicyID
+                  )
+              AND (
+                    ISNULL(@AgentID, '') = ''
+                    OR ISNULL(a.AgentID, '') = @AgentID
+                  )
+              AND (
+                    ISNULL(@AgentName, '') = ''
+                    OR ISNULL(a.AgentName, '')
+                        LIKE '%' + @AgentName + '%'
+                  )
+            ORDER BY
+                a.AgentID,
+                a.PolicyID
+            OFFSET @Offset ROWS
+            FETCH NEXT @PageSize ROWS ONLY;
+            """;
+
+        await using var connection =
+            new SqlConnection(_connectionString);
+
+        await connection.OpenAsync(
+            cancellationToken);
+
+        var totalRows =
+            await ExecuteCountAsync(
+                connection,
+                countSql,
+                normalizedRequest.CompanyId,
+                normalizedRequest.AgentId,
+                normalizedRequest.PolicyId,
+                normalizedRequest.AgentName,
+                cancellationToken);
+
+        var items = new List<AgentDto>();
+
+        await using var command =
+            new SqlCommand(dataSql, connection)
+            {
+                CommandType = CommandType.Text,
+                CommandTimeout = 30
+            };
+
+        AddNullableStringParameter(
+            command,
+            "@CompanyID",
+            normalizedRequest.CompanyId);
+
+        AddNullableStringParameter(
+            command,
+            "@PolicyID",
+            normalizedRequest.PolicyId);
+
+        AddNullableStringParameter(
+            command,
+            "@AgentID",
+            normalizedRequest.AgentId);
+
+        AddNullableStringParameter(
+            command,
+            "@AgentName",
+            normalizedRequest.AgentName);
+
+        AddIntParameter(
+            command,
+            "@Offset",
+            offset);
+
+        AddIntParameter(
+            command,
+            "@PageSize",
+            pageSize);
+
+        await using var reader =
+            await command.ExecuteReaderAsync(
+                cancellationToken);
+
+        while (await reader.ReadAsync(
+            cancellationToken))
+        {
+            items.Add(MapAgent(reader));
+        }
+
+        return new AgentSearchResult
+        {
+            Items = items,
+            TotalRows = totalRows,
+            Page = page,
+            PageSize = pageSize
+        };
+    }
+
+    private static async Task<long> ExecuteCountAsync(
+        SqlConnection connection,
+        string sql,
+        string? companyId,
+        string? agentId,
+        string? policyId,
+        CancellationToken cancellationToken)
+    {
+        return await ExecuteCountAsync(
+            connection,
+            sql,
+            companyId,
+            agentId,
+            policyId,
+            null,
+            cancellationToken);
+    }
+
+    private static async Task<long> ExecuteCountAsync(
+        SqlConnection connection,
+        string sql,
+        string? companyId,
+        string? agentId,
+        string? policyId,
+        string? agentName,
+        CancellationToken cancellationToken)
+    {
+        await using var command =
+            new SqlCommand(sql, connection)
+            {
+                CommandType = CommandType.Text,
+                CommandTimeout = 30
+            };
+
+        AddNullableStringParameter(
+            command,
+            "@CompanyID",
+            companyId);
+
+        AddNullableStringParameter(
+            command,
+            "@PolicyID",
+            policyId);
+
+        AddNullableStringParameter(
+            command,
+            "@AgentID",
+            agentId);
+
+        AddNullableStringParameter(
+            command,
+            "@AgentName",
+            agentName);
+
+        var result =
+            await command.ExecuteScalarAsync(
+                cancellationToken);
+
+        return result is null ||
+               result == DBNull.Value
+            ? 0
+            : Convert.ToInt64(result);
+    }
+
+    private static AgentDto MapAgent(
+        SqlDataReader reader)
+    {
+        return new AgentDto
+        {
+            PolicyID = GetString(
+                reader,
+                "PolicyID"),
+
+            CompanyID = GetString(
+                reader,
+                "CompanyID"),
+
+            AgentID = GetString(
+                reader,
+                "AgentID"),
+
+            AgentName = GetString(
+                reader,
+                "AgentName"),
+
+            AgentEffDate = GetDateTime(
+                reader,
+                "AgentEffDate"),
+
+            AgentStatus = GetString(
+                reader,
+                "AgentStatus"),
+
+            Statusage = GetNullableString(
+                reader,
+                "Statusage"),
+
+            HomePhone = GetNullableString(
+                reader,
+                "HomePhone"),
+
+            CreatedBy = GetNullableString(
+                reader,
+                "CreatedBy"),
+
+            CreatedDate = GetDateTime(
+                reader,
+                "CreatedDate"),
+
+            UpdatedBy = GetNullableString(
+                reader,
+                "UpdatedBy"),
+
+            UpdatedDate = GetDateTime(
+                reader,
+                "UpdatedDate"),
+
+            BranchID = GetNullableString(
+                reader,
+                "BranchID"),
+
+            BranchName = GetNullableString(
+                reader,
+                "BranchName"),
+
+            MainBranchID = GetNullableString(
+                reader,
+                "MainBranchID"),
+
+            MainBranchName = GetNullableString(
+                reader,
+                "MainBranchName"),
+
+            AreaID = GetNullableString(
+                reader,
+                "AreaID"),
+
+            AreaName = GetNullableString(
+                reader,
+                "AreaName"),
+
+            CrudanID = GetNullableString(
+                reader,
+                "CrudanID"),
+
+            CrudanName = GetNullableString(
+                reader,
+                "CrudanName")
+        };
+    }
+
+    private static void AddNullableStringParameter(
+        SqlCommand command,
+        string name,
+        string? value)
+    {
+        command.Parameters.Add(
+            new SqlParameter(
+                name,
+                SqlDbType.VarChar,
+                200)
+            {
+                Value = string.IsNullOrWhiteSpace(value)
+                    ? DBNull.Value
+                    : value.Trim()
+            });
+    }
+
+    private static void AddIntParameter(
+        SqlCommand command,
+        string name,
+        int value)
+    {
+        command.Parameters.Add(
+            new SqlParameter(
+                name,
+                SqlDbType.Int)
+            {
+                Value = value
+            });
+    }
+
+    private static string GetString(
+        SqlDataReader reader,
+        string column)
+    {
+        var value = reader[column];
+
+        return value == DBNull.Value
+            ? string.Empty
+            : Convert.ToString(value)
+                ?? string.Empty;
+    }
+
+    private static string? GetNullableString(
+        SqlDataReader reader,
+        string column)
+    {
+        var value = reader[column];
+
+        return value == DBNull.Value
+            ? null
+            : Convert.ToString(value);
+    }
+
+    private static DateTime? GetDateTime(
+        SqlDataReader reader,
+        string column)
+    {
+        var value = reader[column];
+
+        return value == DBNull.Value
+            ? null
+            : Convert.ToDateTime(value);
+    }
+}
+
+
+using ICLIPS_API.DTOs;
+
+namespace ICLIPS_API.Repositories;
+
+public interface IAgentRepository
+{
+  
+    Task<AgentSearchResult> GetDetailAsync(
+        string? companyId,
+        string? agentId,
+        string? policyId,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default);
+
+
+    Task<AgentSearchResult> SearchAsync(
+        AgentSearchRequest request,
+        CancellationToken cancellationToken = default);
+}
+
+public sealed class AgentSearchRequest
+{
+    public string? CompanyId { get; init; }
+
+    public string? PolicyId { get; init; }
+
+    public string? AgentId { get; init; }
+
+    public string? AgentName { get; init; }
+
+    public int Page { get; init; } = 1;
+
+    public int PageSize { get; init; } = 20;
+
+    public AgentSearchRequest Normalize()
+    {
+        return new AgentSearchRequest
+        {
+            CompanyId = NormalizeValue(CompanyId),
+            PolicyId = NormalizeValue(PolicyId),
+            AgentId = NormalizeValue(AgentId),
+            AgentName = NormalizeValue(AgentName),
+            Page = Math.Max(Page, 1),
+            PageSize = Math.Clamp(PageSize, 1, 100)
+        };
+    }
+
+    private static string? NormalizeValue(
+        string? value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? null
+            : value.Trim();
+    }
+}
+
+public sealed class AgentSearchResult
+{
+    public IReadOnlyList<AgentDto> Items { get; init; } =
+        Array.Empty<AgentDto>();
+
+    public long TotalRows { get; init; }
+
+    public int Page { get; init; }
+
+    public int PageSize { get; init; }
+
+    public int TotalPages =>
+        PageSize <= 0
+            ? 0
+            : (int)Math.Ceiling(
+                TotalRows / (double)PageSize);
+
+    public bool HasPreviousPage =>
+        Page > 1;
+
+    public bool HasNextPage =>
+        Page < TotalPages;
+}
+
+builder.Services.AddScoped<IAgentRepository, AgentRepository>();
