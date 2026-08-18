@@ -1,0 +1,97 @@
+    [HttpGet("{memberID}/activity-history")]
+    public async Task<IActionResult> GetActivityHistory(string memberID)
+        => Ok(await _repo.GetActivityHistoryAsync(memberID));
+
+    [HttpGet("client-search")]
+    public async Task<IActionResult> SearchClients(
+[FromQuery] string companyID,
+[FromQuery] string? clientName = null,
+[FromQuery] string? clientID = null,
+[FromQuery] string? alternateID = null)
+    {
+        var result = await _repo.SearchClientsAsync(
+            companyID,
+            clientName,
+            clientID,
+            alternateID);
+
+        return Ok(result);
+		
+		   public class ClientSearchResult
+   {
+       public string? CompanyID { get; set; }
+       public string? ClientID { get; set; }
+       public string? AlternateID { get; set; }
+       public string? ClientName { get; set; }
+       public DateTime? BirthDate { get; set; }
+       public string? Sex { get; set; }
+   }
+   
+       Task<List<ClientSearchResult>> SearchClientsAsync(
+string companyID,
+string? clientName,
+string? clientID,
+string? alternateID);
+}
+
+        public async Task<List<PolicyOption>> GetPolicyOptionsAsync(string companyID)
+        {
+            const string sql = @"
+ 
+            SELECT PolicyID, OwnerName AS PolicyOwnerName, ProductType as ProductTypeName
+FROM vpolicy
+WHERE CompanyID = @CompanyID";
+
+            using var conn = GetConnection();
+            var result = await conn.QueryAsync<PolicyOption>(sql, new { CompanyID = companyID });
+            return result.ToList();
+        }
+        public async Task<List<ClientSearchResult>> SearchClientsAsync(
+    string companyID,
+    string? clientName,
+    string? clientID,
+    string? alternateID)
+        {
+            const string sql = @"
+        SELECT
+            CompanyID,
+            ClientID,
+            AlternateID,
+            ClientName,
+            BirthDate,
+            Sex
+        FROM dbo.vClientList
+        WHERE CompanyID = @CompanyID
+          AND (
+                @ClientName IS NULL
+                OR LTRIM(RTRIM(@ClientName)) = ''
+                OR ClientName LIKE '%' + @ClientName + '%'
+              )
+          AND (
+                @ClientID IS NULL
+                OR LTRIM(RTRIM(@ClientID)) = ''
+                OR ClientID LIKE '%' + @ClientID + '%'
+              )
+          AND (
+                @AlternateID IS NULL
+                OR LTRIM(RTRIM(@AlternateID)) = ''
+                OR AlternateID LIKE '%' + @AlternateID + '%'
+              )
+        ORDER BY ClientName;";
+
+            using var conn = GetConnection();
+
+            var result = await conn.QueryAsync<ClientSearchResult>(
+                sql,
+                new
+                {
+                    CompanyID = companyID,
+                    ClientName = clientName,
+                    ClientID = clientID,
+                    AlternateID = alternateID
+                });
+
+            return result.ToList();
+        }
+		
+		
