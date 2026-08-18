@@ -1,0 +1,450 @@
+using System.Data;
+using Dapper;
+using Microsoft.Data.SqlClient;
+using ICLIPS_API.Models;
+using ICLIPS_API.DTOs;
+
+namespace ICLIPS_API.Repositories
+{
+    public class CertificateDetailRepository : ICertificateDetailRepository
+    {
+        private readonly string _connStr;
+
+        public CertificateDetailRepository(IConfiguration config)
+        {
+            _connStr = config.GetConnectionString("DefaultConnection")!;
+        }
+
+        private SqlConnection GetConnection() => new SqlConnection(_connStr);
+
+        // ══════════════════════════════════════════════════════
+        // LIST
+        // ══════════════════════════════════════════════════════
+        public async Task<PagedResult<CertificateDto>> GetCertificateListAsync(CertificateFilterDto filter)
+        {
+            if (filter.PageNumber < 1) filter.PageNumber = 1;
+            if (filter.PageSize < 1 || filter.PageSize > 200) filter.PageSize = 20;
+
+            using var conn = GetConnection();
+            var p = new DynamicParameters();
+            p.Add("@MemberID", filter.MemberID);
+            p.Add("@CompanyID", filter.CompanyID);
+            p.Add("@PolicyID", filter.PolicyID);
+            p.Add("@CertificateID", filter.CertificateID);
+            p.Add("@CertificateStatus", filter.CertificateStatus);
+            p.Add("@InsuredName", filter.InsuredName);
+            p.Add("@PageNumber", filter.PageNumber);
+            p.Add("@PageSize", filter.PageSize);
+            p.Add("@SortColumn", filter.SortColumn);
+            p.Add("@SortDirection", filter.SortDirection);
+
+            using var multi = await conn.QueryMultipleAsync("dbo.sp_GetCertificateNewList", p, commandType: CommandType.StoredProcedure);
+            var total = await multi.ReadFirstOrDefaultAsync<int>();
+            var data = (await multi.ReadAsync<CertificateDto>()).ToList();
+
+            return new PagedResult<CertificateDto> { Data = data, TotalRecords = total, PageNumber = filter.PageNumber, PageSize = filter.PageSize };
+        }
+
+        public async Task<CertificateDto?> GetByMemberIdAsync(string memberId, string companyId)
+        {
+            using var conn = GetConnection();
+            var p = new DynamicParameters();
+            p.Add("@MemberID", memberId);
+            p.Add("@CompanyID", companyId);
+            p.Add("@PageNumber", 1);
+            p.Add("@PageSize", 1);
+
+            using var multi = await conn.QueryMultipleAsync("dbo.sp_GetCertificateList", p, commandType: CommandType.StoredProcedure);
+            await multi.ReadFirstOrDefaultAsync<int>();
+            return await multi.ReadFirstOrDefaultAsync<CertificateDto>();
+        }
+
+        // ══════════════════════════════════════════════════════
+        // HEADER
+        // ══════════════════════════════════════════════════════
+        public async Task<CertificateHeader?> GetHeaderAsync(string certificateID)
+        {
+            const string sql = @"
+                SELECT [MemberID],[CompanyID],[PolicyID],[PolicyOwnerName],[ProductType],
+                       [ProductTypeName],[PartnerID],[PartnerName],[CertificateID],[InsuredID],
+                       [InsuredName],[DebiturID],[DebiturName],[CertificateStatus],
+                       [CertificateStatusName],[UnderwritingStatus],[UnderwritingStatusName],
+                       [PendingTransNo],[PendingTransType],[PendingTransTypeName],
+                       [ProgressStatus],[ProgressStatusName],[MedicalType],[PendingItem],
+                       [MedicalTypeName]
+                FROM [CertificateHeader]
+                WHERE [CertificateID] = @CertificateID";
+            using var conn = GetConnection();
+            return await conn.QueryFirstOrDefaultAsync<CertificateHeader>(sql, new { CertificateID = certificateID });
+        }
+
+        // ══════════════════════════════════════════════════════
+        // CERTIFICATE INFO
+        // ══════════════════════════════════════════════════════
+        public async Task<CertificateInfo?> GetCertificateInfoAsync(string memberID)
+        {
+            const string sql = @"
+                SELECT a.*, coalesce(c.StandardPremiumAmount,0) as BillAmount,
+                       c.StandardNettPremiumAmount as PremiumNettAmount,
+                       c.StandardTaxAmount as PremiumTaxAmount,
+                       c.StandardTaxRate as PremiumTaxRate,
+                       rtrim(convert(varchar,c.ExtraPremiumRate) + '' + c.extrapremiumtype) ExtraPremiumRate,
+                       c.ExtraPremiumAmount,
+                       c.ExtraPremiumNettAmount ExtraPremiumNett,
+                       (case when a.BasePlan IN ('HLDROD','HLDROE','HLDROF')
+                             then c.StandardNettPremiumAmount
+                             else c.StandardPremiumAmount end
+                        + coalesce(c.ExtraPremiumNettAmount,0)
+                       ) as TotalPremium,
+                       dbo.fnc_AllowToProcess(a.ProgressStatus, a.PendingItem) As AllowedProcess,
+                       CASE WHEN a.PolicyID IN ('778','7863')
+                            THEN CONVERT(date, tt.TransactionDate)
+                            ELSE CONVERT(date, a.InforceDate) END AS InforceDate
+                FROM vCertificate a
+                LEFT OUTER JOIN (
+                    SELECT MAX(TransactionDate) TransactionDate, MemberID
+                    FROM dbo.tcertificate_transaction
+                    WHERE TransactionID = 'PRTCN'
+                    GROUP BY MemberID
+                ) tt on tt.MemberID = a.MemberID
+                LEFT OUTER JOIN tcertificate_coverage c
+                    on a.memberid = c.memberid AND c.PlanType in ('B','X')
+                WHERE a.MemberID = @MemberID";
+            using var conn = GetConnection();
+            return await conn.QueryFirstOrDefaultAsync<CertificateInfo>(sql, new { MemberID = memberID });
+        }
+
+        // ══════════════════════════════════════════════════════
+        // CLIENT INFO
+        // ══════════════════════════════════════════════════════
+        public async Task<ClientInfo?> GetClientInfoAsync(string clientID)
+        {
+            const string sql = @"
+                SELECT CompanyID, ClientID, AlternateID, ClientType, ClientName, NameType, AliasName,
+                       Citizenship, IDType, IDNumber, IDExpireDate, Sex, BirthPlace, BirthDate,
+                       MaritalStatus, Religion, CompanyName, CompanyBizLine, JobTitle, JobDescription,
+                       OfficeAddress, OfficeDistrict, OfficeCity, OfficePostalCode, OfficePhone, OfficeFax,
+                       HomeAddress, HomeDistrict, HomeCity, HomePostalCode, HomePhone, HomeFax,
+                       LivingAddress, LivingDistrict, LivingCity, LivingPostalCode, LivingPhone,
+                       LivingFax, EmailAddress, MobileNumber, TaxNumber
+                FROM tclient
+                WHERE ClientID = @ClientID";
+            using var conn = GetConnection();
+            return await conn.QueryFirstOrDefaultAsync<ClientInfo>(sql, new { ClientID = clientID });
+        }
+
+        // ══════════════════════════════════════════════════════
+        // AGENT INFO
+        // ══════════════════════════════════════════════════════
+
+        public async Task<AgentInfo?> GetAgentInfoAsync(string memberID, string companyID, string policyID)
+        {
+            const string sql = @"
+        SELECT ca.AgentID, x.AgentName, ca.BranchID,
+               x.BranchName, x.MainBranchName, x.AreaName, x.CredamName,
+               ca.CaseSharing
+        FROM tcertificate_agent ca
+        LEFT JOIN vAgentList x
+            ON ca.AgentID = x.AgentID
+        WHERE ca.MemberID = @MemberID
+          AND ca.CompanyID = @CompanyID
+          AND x.PolicyId = @PolicyID";
+
+            using var conn = GetConnection();
+            return await conn.QueryFirstOrDefaultAsync<AgentInfo>(sql, new
+            {
+                MemberID = memberID,
+                CompanyID = companyID,
+                PolicyID = policyID
+            });
+        }
+        // ══════════════════════════════════════════════════════
+        // COVERAGE & DOCUMENT
+        // ══════════════════════════════════════════════════════
+        public async Task<List<ProductPackageOption>> GetProductPackageOptionsAsync(string companyID, string? productPackageID)
+        {
+            const string sql = @"
+                SELECT CompanyID, ProductPackageID, ProductPackageName
+                FROM product_package
+                WHERE CompanyID = @CompanyID
+                  AND (@ProductPackageID IS NULL OR ProductPackageID = @ProductPackageID)";
+            using var conn = GetConnection();
+            var result = await conn.QueryAsync<ProductPackageOption>(sql, new { CompanyID = companyID, ProductPackageID = productPackageID });
+            return result.ToList();
+        }
+
+        public async Task<List<CoverageDocumentInfo>> GetCoverageDocumentAsync(string companyID, string productPackageID, string memberID)
+        {
+            const string sql = @"
+                SELECT ROW_NUMBER() OVER (ORDER BY pp.PlanID DESC) AS CertificateCoverageID,
+                       pp.PlanID,
+                       p.PlanName,
+                       coalesce(cc.FaceAmount,0) as FaceAmount,
+                       coalesce(cc.CoverageDuration,0) as CoverageDuration,
+                       case when pd.MonthlyMode = 'Y' then 'M' else 'Y' end as DurationUnit,
+                       tdc.CodeName as DurationUnitName,
+                       cc.EffectiveDate as CoverageEffectiveDate,
+                       cc.CoverageMaturity as CoverageMaturityDate,
+                       pp.PlanSequence, pp.ProductPackageID
+                FROM tproduct_package_plan pp
+                INNER JOIN tplan p ON pp.CompanyID = p.CompanyID AND pp.PlanID = p.PlanID
+                INNER JOIN tplan_details pd ON p.CompanyID = pd.CompanyID AND p.PlanID = pd.PlanID
+                LEFT JOIN tcertificate_coverage cc ON p.PlanID = cc.PlanID AND cc.MemberID = @MemberID
+                LEFT JOIN tdcode tdc ON tdc.CompanyID = pd.CompanyID AND tdc.CodeType = 'DURTP'
+                     AND tdc.CodeID = case when pd.MonthlyMode = 'Y' then 'H' else 'Y' end
+                WHERE pp.CompanyID = @CompanyID AND pp.ProductPackageID = @ProductPackageID
+                ORDER BY pp.PlanSequence";
+            using var conn = GetConnection();
+            var result = await conn.QueryAsync<CoverageDocumentInfo>(sql, new { CompanyID = companyID, ProductPackageID = productPackageID, MemberID = memberID });
+            return result.ToList();
+        }
+
+        // ══════════════════════════════════════════════════════
+        // FINANCIAL & HEALTH
+        // ══════════════════════════════════════════════════════
+        public async Task<List<HealthQuestionInfo>> GetFinancialHealthAsync(string companyID, string productID, string policyID, string memberID)
+        {
+            const string sql = @"
+                SELECT DISTINCT a.HealthQueID AS NoUrut, a.HealthQueID, a.HealthQueDesc, a.IsAnswer,
+                       COALESCE(d.Answer,0) AS Answer,
+                       coalesce(d.Explaination,'') as Explaination
+                FROM thealth_question a
+                INNER JOIN tproduct_health_mapping b ON a.HealthQueID = b.HealthQueID
+                LEFT JOIN tcertificate c ON b.CompanyID = c.CompanyID AND b.PolicyID = c.PolicyID
+                LEFT JOIN tcertificate_health d ON c.MemberID = d.MemberID
+                WHERE b.CompanyID = @CompanyID
+                  AND b.ProductID = @ProductID
+                  AND b.PolicyID = @PolicyID
+                  AND (@MemberID = '0' OR c.MemberID = @MemberID)";
+            using var conn = GetConnection();
+            var result = await conn.QueryAsync<HealthQuestionInfo>(sql, new { CompanyID = companyID, ProductID = productID, PolicyID = policyID, MemberID = memberID });
+            return result.ToList();
+        }
+
+        // ══════════════════════════════════════════════════════
+        // POLICY HISTORY — Product Applied
+        // ══════════════════════════════════════════════════════
+        public async Task<List<ProductAppliedItem>> GetPolicyHistoryProductAppliedAsync(string memberID)
+        {
+            const string sql = @"
+                SELECT DISTINCT 1 as IsUsed, a.ProductType AS DataSource,
+                       a.CompanyID, d.CompanyName, a.CertificateID as PolicyID, b.PlanID, c.PlanName,
+                       b.EffectiveDate, b.FaceAmount,
+                       CONVERT(varchar, b.CertificateCoverageID) as CvgNum
+                FROM vcertificate a
+                INNER JOIN tcertificate_coverage b ON a.MemberID = b.MemberID
+                INNER JOIN tplan c ON a.CompanyID = c.CompanyID AND b.PlanID = c.PlanID AND c.PlanType in ('B','X')
+                INNER JOIN tcompany d ON a.CompanyID = d.CompanyID
+                WHERE a.MemberID = @MemberID";
+            using var conn = GetConnection();
+            var result = await conn.QueryAsync<ProductAppliedItem>(sql, new { MemberID = memberID });
+            return result.ToList();
+        }
+
+        public async Task<List<PolicyHistoryItem>> GetPolicyHistoryAsync(string memberID)
+        {
+            const string sql = @"
+                SELECT MemberID, TransactionID, TransactionName, TransactionDate, Remarks
+                FROM tcertificate_transaction
+                WHERE MemberID = @MemberID
+                ORDER BY TransactionDate DESC";
+            using var conn = GetConnection();
+            var result = await conn.QueryAsync<PolicyHistoryItem>(sql, new { MemberID = memberID });
+            return result.ToList();
+        }
+
+        // ══════════════════════════════════════════════════════
+        // LETTERS
+        // ══════════════════════════════════════════════════════
+        public async Task<List<LetterItem>> GetLettersAsync(string memberID)
+        {
+            const string sql = @"
+                SELECT
+                    a.TransReportID,
+                    a.ReportID,
+                    l.ReportName,
+                    a.ReportDate,
+                    dbo.fnc_GetUserName(u.CompanyID, a.CreatedBy) as CreatedBy,
+                    a.CreatedDate,
+                    a.ReportLink,
+                    a.Notes
+                FROM ttrans_report a
+                INNER JOIN tcertificate u ON a.ReferenceID = CONVERT(varchar, u.MemberID)
+                INNER JOIN treport l ON u.CompanyID = l.CompanyID AND a.ReportID = l.ReportID AND l.ReportGroup = 'ADM'
+                WHERE a.ReferenceID = CONVERT(varchar, @MemberID)
+                ORDER BY a.ReportDate DESC";
+            using var conn = GetConnection();
+            var result = await conn.QueryAsync<LetterItem>(sql, new { MemberID = memberID });
+            return result.ToList();
+        }
+
+        // ══════════════════════════════════════════════════════
+        // ACTIVITY HISTORY
+        // ══════════════════════════════════════════════════════
+        public async Task<List<ActivityHistoryItem>> GetActivityHistoryAsync(string memberID)
+        {
+            const string sql = @"
+                SELECT a.CertificateTransactionID as HistoryID,
+                       a.TransactionDate as HistoryDate,
+                       b.codename as HistoryType,
+                       dbo.fnc_GetUserName(b.CompanyID, a.CreatedBy) as HistoryBy,
+                       a.Notes as HistoryNotes
+                FROM tcertificate_transaction a
+                LEFT JOIN tcertificate c ON a.MemberID = c.MemberID
+                LEFT JOIN tdcode b ON b.CompanyID = c.CompanyID AND a.TransactionID = b.CodeID AND b.CodeType = 'TSKTY'
+                WHERE a.MemberID = @MemberID
+
+                UNION ALL
+
+                SELECT a.UnderwritingHistoryID as HistoryID,
+                       a.HistoryDate,
+                       COALESCE(g.CodeName,'') as HistoryType,
+                       dbo.fnc_GetUserName(b.CompanyID, a.CreatedBy) as HistoryBy,
+                       a.HistoryNotes
+                FROM tcertificate c
+                INNER JOIN tunderwriting b ON c.CertificateID = b.CertificateID
+                INNER JOIN tunderwriting_history a ON a.underwritingid = b.underwritingid
+                LEFT OUTER JOIN tdcode g ON b.CompanyID = g.CompanyID AND a.HistoryType = g.CodeID AND g.CodeType = 'HSTTP'
+                WHERE c.MemberID = @MemberID
+                ORDER BY HistoryDate DESC";
+            using var conn = GetConnection();
+            var result = await conn.QueryAsync<ActivityHistoryItem>(sql, new { MemberID = memberID });
+            return result.ToList();
+        }
+        public async Task<List<PolicyOption>> GetPolicyOptionsAsync(string companyID)
+        {
+            const string sql = @"
+ 
+            SELECT PolicyID, OwnerName AS PolicyOwnerName, ProductType as ProductTypeName
+FROM vpolicy
+WHERE CompanyID = @CompanyID";
+
+            using var conn = GetConnection();
+            var result = await conn.QueryAsync<PolicyOption>(sql, new { CompanyID = companyID });
+            return result.ToList();
+        }
+    }
+}
+
+using ICLIPS_API.Models;
+using ICLIPS_API.DTOs;
+
+namespace ICLIPS_API.Repositories
+{
+    public interface ICertificateDetailRepository
+    {
+        Task<PagedResult<CertificateDto>> GetCertificateListAsync(CertificateFilterDto filter);
+        Task<CertificateDto?> GetByMemberIdAsync(string memberId, string companyId);
+
+        Task<CertificateHeader?> GetHeaderAsync(string certificateID);
+        Task<CertificateInfo?> GetCertificateInfoAsync(string memberID);
+
+        Task<ClientInfo?> GetClientInfoAsync(string clientID);
+        Task<AgentInfo?> GetAgentInfoAsync(string companyID, string policyID, string agentID);
+
+        Task<List<ProductPackageOption>> GetProductPackageOptionsAsync(string companyID, string? productPackageID);
+        Task<List<CoverageDocumentInfo>> GetCoverageDocumentAsync(string companyID, string productPackageID, string memberID);
+
+        Task<List<HealthQuestionInfo>> GetFinancialHealthAsync(string companyID, string productID, string policyID, string memberID);
+
+        Task<List<ProductAppliedItem>> GetPolicyHistoryProductAppliedAsync(string memberID);
+        Task<List<PolicyHistoryItem>> GetPolicyHistoryAsync(string memberID);
+        Task<List<PolicyOption>> GetPolicyOptionsAsync(string companyID);
+        Task<List<LetterItem>> GetLettersAsync(string memberID);
+        Task<List<ActivityHistoryItem>> GetActivityHistoryAsync(string memberID);
+    }
+}
+
+ public class PolicyOption
+ {
+     public string? PolicyID { get; set; }
+     public string? PolicyOwnerName { get; set; }
+     public string? ProductTypeName { get; set; }
+ }
+ 
+ using Microsoft.AspNetCore.Mvc;
+using ICLIPS_API.Repositories;
+using ICLIPS_API.DTOs;
+
+namespace ICLIPS_API.Controllers
+{
+    [ApiController]
+    [Route("api/certificate")]
+    public class CertificateController : ControllerBase
+    {
+        private readonly ICertificateDetailRepository _repo;
+
+        public CertificateController(ICertificateDetailRepository repo) => _repo = repo;
+
+        [HttpGet]
+        public async Task<IActionResult> GetList([FromQuery] CertificateFilterDto filter)
+            => Ok(await _repo.GetCertificateListAsync(filter));
+
+        [HttpGet("by-member")]
+        public async Task<IActionResult> GetByMember([FromQuery] string memberId, [FromQuery] string companyId)
+        {
+            var result = await _repo.GetByMemberIdAsync(memberId, companyId);
+            return result == null ? NotFound() : Ok(result);
+        }
+
+        [HttpGet("{certificateID}/detail")]
+        public async Task<IActionResult> GetDetail(string certificateID)
+        {
+            try
+            {
+                var header = await _repo.GetHeaderAsync(certificateID);
+                if (header == null) return NotFound(new { message = "Certificate not found" });
+
+                var certInfo = await _repo.GetCertificateInfoAsync(header.MemberID);
+                return Ok(new { header, certInfo });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { message = ex.Message });
+            }
+        }
+
+        // ── Client, Agent & Beneficiary ─────────────────────────
+        [HttpGet("client/{clientID}")]
+        public async Task<IActionResult> GetClientInfo(string clientID)
+            => Ok(await _repo.GetClientInfoAsync(clientID));
+
+
+        [HttpGet("policy-options")]
+        public async Task<IActionResult> GetPolicyOptions([FromQuery] string companyID)
+    => Ok(await _repo.GetPolicyOptionsAsync(companyID));
+
+        // ── Coverage & Document ─────────────────────────────────
+        [HttpGet("product-package")]
+        public async Task<IActionResult> GetProductPackageOptions([FromQuery] string companyID, [FromQuery] string? productPackageID)
+            => Ok(await _repo.GetProductPackageOptionsAsync(companyID, productPackageID));
+
+        [HttpGet("{memberID}/coverage-document")]
+        public async Task<IActionResult> GetCoverageDocument(string memberID, [FromQuery] string companyID, [FromQuery] string productPackageID)
+            => Ok(await _repo.GetCoverageDocumentAsync(companyID, productPackageID, memberID));
+
+        // ── Financial & Health ───────────────────────────────────
+        [HttpGet("{memberID}/financial-health")]
+        public async Task<IActionResult> GetFinancialHealth(string memberID, [FromQuery] string companyID, [FromQuery] string productID, [FromQuery] string policyID)
+            => Ok(await _repo.GetFinancialHealthAsync(companyID, productID, policyID, memberID));
+
+        // ── Policy History ───────────────────────────────────────
+        [HttpGet("{memberID}/policy-history/product-applied")]
+        public async Task<IActionResult> GetProductApplied(string memberID)
+            => Ok(await _repo.GetPolicyHistoryProductAppliedAsync(memberID));
+
+        [HttpGet("{memberID}/policy-history")]
+        public async Task<IActionResult> GetPolicyHistory(string memberID)
+            => Ok(await _repo.GetPolicyHistoryAsync(memberID));
+
+        // ── Letters ───────────────────────────────────────────────
+        [HttpGet("{memberID}/letters")]
+        public async Task<IActionResult> GetLetters(string memberID)
+            => Ok(await _repo.GetLettersAsync(memberID));
+
+        // ── Activity History ──────────────────────────────────────
+        [HttpGet("{memberID}/activity-history")]
+        public async Task<IActionResult> GetActivityHistory(string memberID)
+            => Ok(await _repo.GetActivityHistoryAsync(memberID));
+    }
+}
