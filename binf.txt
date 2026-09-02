@@ -1,0 +1,98 @@
+[Route("api/[controller]")]
+[ApiController]
+[Authorize]
+public class BenefitInformationController : ControllerBase
+{
+    private readonly IBenefitInformationRepository _repository;
+    private readonly ILogger<BenefitInformationController> _logger;
+
+    public BenefitInformationController(
+        IBenefitInformationRepository repository,
+        ILogger<BenefitInformationController> logger)
+    {
+        _repository = repository;
+        _logger = logger;
+    }
+
+    [HttpPost]
+    [ProducesResponseType(typeof(BenefitInformationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ValidationProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status408RequestTimeout)]
+    [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> Post([FromBody] BenefitInformationRequest request)
+    {
+        try
+        {
+            var maskedPolicyId = MaskPolicyId(request.PolicyID);
+            _logger.LogInformation("Fetching benefit info for PolicyID={PolicyID}", maskedPolicyId);
+
+            var result = await _repository.GetBenefitInformationAsync(request.PolicyID);
+
+            if (result == null || (result.CoverageInformation?.Count ?? 0) == 0)
+            {
+                _logger.LogWarning("No benefit info found PolicyID={PolicyID}", maskedPolicyId);
+                return NotFound(new ErrorResponse
+                {
+                    Success = false,
+                    ErrorCode = "DATA_NOT_FOUND",
+                    Message = "No benefit information found",
+                    Timestamp = DateTime.UtcNow
+                });
+            }
+
+            return Ok(result);
+        }
+        catch (TimeoutException ex)
+        {
+            _logger.LogError(ex, "Timeout while fetching benefit information");
+            return StatusCode(StatusCodes.Status408RequestTimeout, new ErrorResponse
+            {
+                Success = false,
+                ErrorCode = "TIMEOUT_ERROR",
+                Message = "Request timeout. Please try again.",
+                Timestamp = DateTime.UtcNow
+            });
+        }
+        catch (SqlException ex)
+        {
+            _logger.LogError(ex, "Database error while fetching benefit information");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Success = false,
+                ErrorCode = "DATABASE_ERROR",
+                Message = "A database error occurred. Please contact support.",
+                Timestamp = DateTime.UtcNow
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error while fetching benefit information");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
+            {
+                Success = false,
+                ErrorCode = "INTERNAL_ERROR",
+                Message = "An unexpected error occurred",
+                Timestamp = DateTime.UtcNow
+            });
+        }
+    }
+
+    private static string MaskPolicyId(string? policyId)
+    {
+        if (string.IsNullOrWhiteSpace(policyId)) return "EMPTY";
+        if (policyId.Length <= 4) return "****";
+        return $"{policyId[..2]}****{policyId[^2..]}";
+    }
+}
+
+
+using System.ComponentModel.DataAnnotations;
+
+public class BenefitInformationRequest
+{
+    [Required(ErrorMessage = "PolicyID is required")]
+    [StringLength(50, MinimumLength = 3, ErrorMessage = "PolicyID length is invalid")]
+    [RegularExpression(@"^[A-Za-z0-9\-\/]+$", ErrorMessage = "PolicyID format is invalid")]
+    public string PolicyID { get; set; } = string.Empty;
+}
